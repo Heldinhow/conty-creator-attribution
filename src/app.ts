@@ -160,8 +160,9 @@ export function createApp(db: DatabaseHandle): Hono {
   });
 
   app.get("/refunds", (c) => {
-    const orderId = c.req.query("orderId");
-    if (!orderId || orderId.trim() === "") {
+    const rawOrderId = c.req.query("orderId");
+    const orderId = rawOrderId?.trim();
+    if (!orderId) {
       return c.json({ error: "orderId query parameter is required" }, 400);
     }
     const refunds = db

@@ -163,4 +163,14 @@ describe("refund ingestion", () => {
     expect(body.refunds).toHaveLength(2);
     expect(body.refunds[0]).toMatchObject({ id: "ref-pre1", status: "pending" });
   });
+
+  it("trims whitespace in the refund listing query", async () => {
+    await postRefund({ id: "ref-ws1", orderId: "ord-ws", amountCents: 300 });
+
+    const res = await app.request("/refunds?orderId=%20%20ord-ws%20%20");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.orderId).toBe("ord-ws");
+    expect(body.refunds).toHaveLength(1);
+  });
 });
