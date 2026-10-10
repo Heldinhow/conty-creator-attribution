@@ -65,6 +65,8 @@ function orderView(db: DatabaseHandle, row: OrderRow) {
     .all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? ORDER BY rowid", [row.id])
     .map(refundView);
   const appliedSum = refunds.reduce((sum, r) => (r.status === "applied" ? sum + r.amountCents : sum), 0);
+  // Reversed is derived, never stored: applied refunds equal the total.
+  const attributionStatus = appliedSum === row.total_cents ? "reversed" : row.attribution_status;
   return {
     id: row.id,
     totalCents: row.total_cents,
@@ -78,7 +80,7 @@ function orderView(db: DatabaseHandle, row: OrderRow) {
       : null,
     refunds,
     netTotalCents: row.total_cents - appliedSum,
-    attributionStatus: row.attribution_status,
+    attributionStatus,
   };
 }
 
@@ -132,6 +134,20 @@ export function createApp(db: DatabaseHandle): Hono {
           creator ? "attributed" : "unattributed",
         ]
       );
+      // Apply early refunds in arrival order inside the same transaction,
+      // respecting the cap: a pending that would breach it becomes rejected.
+      let appliedSum = 0;
+      const pendings = db.all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? AND status = 'pending' ORDER BY rowid", [
+        body.id,
+      ]);
+      for (const pending of pendings) {
+        if (appliedSum + pending.amount_cents > body.totalCents) {
+          db.run("UPDATE refunds SET status = 'rejected', reason = 'exceeds-total' WHERE id = ?", [pending.id]);
+        } else {
+          db.run("UPDATE refunds SET status = 'applied', reason = NULL WHERE id = ?", [pending.id]);
+          appliedSum += pending.amount_cents;
+        }
+      }
       return { row: db.get<OrderRow>("SELECT * FROM orders WHERE id = ?", [body.id])!, created: true };
     });
     return c.json(orderView(db, result.row), result.created ? 201 : 200);
@@ -141,6 +157,17 @@ export function createApp(db: DatabaseHandle): Hono {
     const row = db.get<OrderRow>("SELECT * FROM orders WHERE id = ?", [c.req.param("id")]);
     if (!row) return c.json({ error: "order not found" }, 404);
     return c.json(orderView(db, row));
+  });
+
+  app.get("/refunds", (c) => {
+    const orderId = c.req.query("orderId");
+    if (!orderId || orderId.trim() === "") {
+      return c.json({ error: "orderId query parameter is required" }, 400);
+    }
+    const refunds = db
+      .all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? ORDER BY rowid", [orderId])
+      .map(refundView);
+    return c.json({ orderId, refunds });
   });
 
   app.post("/refunds", async (c) => {
@@ -153,7 +180,15 @@ export function createApp(db: DatabaseHandle): Hono {
       const existing = db.get<RefundRow>("SELECT * FROM refunds WHERE id = ?", [body.id]);
       if (existing) return { kind: "duplicate" as const, row: existing };
       const order = db.get<OrderRow>("SELECT * FROM orders WHERE id = ?", [body.orderId]);
-      if (!order) return { kind: "unknown-order" as const, row: null };
+      // Early refund: stored as pending, applied when the order arrives.
+      if (!order) {
+        db.run("INSERT INTO refunds (id, order_id, amount_cents, status, reason) VALUES (?, ?, ?, 'pending', NULL)", [
+          body.id,
+          body.orderId,
+          body.amountCents,
+        ]);
+        return { kind: "pending" as const, row: db.get<RefundRow>("SELECT * FROM refunds WHERE id = ?", [body.id])! };
+      }
       const applied = db.get<{ sum: number | null }>(
         "SELECT SUM(amount_cents) AS sum FROM refunds WHERE order_id = ? AND status = 'applied'",
         [body.orderId]
@@ -173,11 +208,10 @@ export function createApp(db: DatabaseHandle): Hono {
       ]);
       return { kind: "applied" as const, row: db.get<RefundRow>("SELECT * FROM refunds WHERE id = ?", [body.id])! };
     });
-    if (result.kind === "unknown-order") return c.json({ error: "order not found" }, 404);
     if (result.kind === "rejected") {
       return c.json({ error: "refund exceeds order total", reason: "exceeds-total", refund: refundView(result.row) }, 422);
     }
-    return c.json(refundView(result.row), result.kind === "applied" ? 201 : 200);
+    return c.json(refundView(result.row), result.kind === "duplicate" ? 200 : 201);
   });
 
   return app;

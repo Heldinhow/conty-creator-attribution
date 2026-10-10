@@ -89,8 +89,78 @@ describe("refund ingestion", () => {
     expect((await got.json()).netTotalCents).toBe(2000);
   });
 
-  it("returns 404 for a refund on an unknown order", async () => {
+  it("stores a refund for an unknown order as pending instead of 404", async () => {
     const res = await postRefund({ id: "ref-ghost", orderId: "nope", amountCents: 100 });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ id: "ref-ghost", orderId: "nope", status: "pending" });
+  });
+
+  it("applies an early refund in arrival order when the order lands", async () => {
+    const early = await postRefund({ id: "ref-early", orderId: "ord-early", amountCents: 400 });
+    expect(early.status).toBe(201);
+    expect(await early.json()).toMatchObject({ status: "pending" });
+
+    const created = await postOrder({ id: "ord-early", totalCents: 2000, coupon: "ANA10", status: "paid" });
+    expect(created.status).toBe(201);
+
+    const got = await app.request("/orders/ord-early");
+    const body = await got.json();
+    expect(body.netTotalCents).toBe(1600);
+    expect(body.refunds).toHaveLength(1);
+    expect(body.refunds[0]).toMatchObject({ id: "ref-early", amountCents: 400, status: "applied" });
+    expect(body.attributionStatus).toBe("attributed");
+  });
+
+  it("applies multiple early refunds in arrival order, rejecting the one that breaches the cap", async () => {
+    await postRefund({ id: "ref-e1", orderId: "ord-multi", amountCents: 1500 });
+    await postRefund({ id: "ref-e2", orderId: "ord-multi", amountCents: 600 });
+
+    await postOrder({ id: "ord-multi", totalCents: 2000, coupon: "ANA10", status: "paid" });
+
+    const got = await app.request("/orders/ord-multi");
+    const body = await got.json();
+    expect(body.netTotalCents).toBe(500);
+    const first = body.refunds.find((r: { id: string }) => r.id === "ref-e1");
+    const second = body.refunds.find((r: { id: string }) => r.id === "ref-e2");
+    expect(first).toMatchObject({ status: "applied" });
+    expect(second).toMatchObject({ status: "rejected", reason: "exceeds-total" });
+  });
+
+  it("marks a fully refunded order as reversed while keeping creator and history", async () => {
+    await postOrder({ id: "ord-full", totalCents: 2000, coupon: "ANA10", status: "paid" });
+    await postRefund({ id: "ref-full", orderId: "ord-full", amountCents: 2000 });
+
+    const got = await app.request("/orders/ord-full");
+    const body = await got.json();
+    expect(body.netTotalCents).toBe(0);
+    expect(body.attributionStatus).toBe("reversed");
+    expect(body.creator).toMatchObject({ couponCode: "ANA10" });
+    expect(body.creatorId).not.toBeNull();
+    expect(body.refunds).toHaveLength(1);
+  });
+
+  it("marks cumulative partials summing to the total as reversed", async () => {
+    await postOrder({ id: "ord-cum", totalCents: 2000, coupon: "ANA10", status: "paid" });
+    await postRefund({ id: "ref-c1", orderId: "ord-cum", amountCents: 1200 });
+    await postRefund({ id: "ref-c2", orderId: "ord-cum", amountCents: 800 });
+
+    const got = await app.request("/orders/ord-cum");
+    const body = await got.json();
+    expect(body.netTotalCents).toBe(0);
+    expect(body.attributionStatus).toBe("reversed");
+    expect(body.creator).toMatchObject({ couponCode: "ANA10" });
+    expect(body.refunds).toHaveLength(2);
+  });
+
+  it("lists refunds per order id even before the order exists", async () => {
+    await postRefund({ id: "ref-pre1", orderId: "ord-pre", amountCents: 300 });
+    await postRefund({ id: "ref-pre2", orderId: "ord-pre", amountCents: 5000 });
+
+    const res = await app.request("/refunds?orderId=ord-pre");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.orderId).toBe("ord-pre");
+    expect(body.refunds).toHaveLength(2);
+    expect(body.refunds[0]).toMatchObject({ id: "ref-pre1", status: "pending" });
   });
 });
