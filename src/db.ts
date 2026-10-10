@@ -67,5 +67,15 @@ export function migrate(db: DatabaseHandle): void {
       coupon_code TEXT NOT NULL UNIQUE,
       utm_campaign TEXT NOT NULL UNIQUE
     );
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      total_cents INTEGER NOT NULL,
+      coupon TEXT,
+      utm_source TEXT,
+      utm_campaign TEXT,
+      store_status TEXT,
+      creator_id INTEGER REFERENCES creators(id),
+      attribution_status TEXT NOT NULL
+    );
   `);
 }
