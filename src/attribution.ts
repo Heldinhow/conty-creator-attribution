@@ -1,8 +1,18 @@
-import { normalizeCoupon, normalizeUtmCampaign, type Creator } from "./creators.js";
+import type { Creator } from "./creators.js";
 
 export interface AttributionInput {
   coupon?: string | null;
   utmCampaign?: string | null;
+}
+
+// Normalization, owned by the single attribution module:
+// coupon trimmed + uppercased, UTM campaign trimmed + lowercased.
+export function normalizeCoupon(raw: string): string {
+  return raw.trim().toUpperCase();
+}
+
+export function normalizeUtmCampaign(raw: string): string {
+  return raw.trim().toLowerCase();
 }
 
 // Single attribution rule: coupon match wins over UTM match, else null.

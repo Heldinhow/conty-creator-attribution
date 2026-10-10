@@ -152,6 +152,18 @@ describe("refund ingestion", () => {
     expect(body.refunds).toHaveLength(2);
   });
 
+  it("keeps a fully refunded creator-less order unattributed with net zero", async () => {
+    await postOrder({ id: "ord-nocreator", totalCents: 1000, coupon: "UNKNOWN", status: "paid" });
+    await postRefund({ id: "ref-nc1", orderId: "ord-nocreator", amountCents: 1000 });
+
+    const got = await app.request("/orders/ord-nocreator");
+    const body = await got.json();
+    expect(body.creator).toBeNull();
+    expect(body.creatorId).toBeNull();
+    expect(body.netTotalCents).toBe(0);
+    expect(body.attributionStatus).toBe("unattributed");
+  });
+
   it("lists refunds per order id even before the order exists", async () => {
     await postRefund({ id: "ref-pre1", orderId: "ord-pre", amountCents: 300 });
     await postRefund({ id: "ref-pre2", orderId: "ord-pre", amountCents: 5000 });

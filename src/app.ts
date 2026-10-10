@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { type DatabaseHandle, migrate } from "./db.js";
 import { resolveAttribution } from "./attribution.js";
@@ -25,6 +26,10 @@ const RefundBody = z.object({
   amountCents: z.number().int("amountCents must be an integer").positive("amountCents must be positive"),
 });
 
+type StoredAttributionStatus = "attributed" | "unattributed";
+type DerivedAttributionStatus = StoredAttributionStatus | "reversed";
+type RefundStatus = "applied" | "pending" | "rejected";
+
 interface OrderRow {
   id: string;
   total_cents: number;
@@ -33,15 +38,19 @@ interface OrderRow {
   utm_campaign: string | null;
   store_status: string | null;
   creator_id: number | null;
-  attribution_status: string;
+  attribution_status: StoredAttributionStatus;
 }
 
 interface RefundRow {
   id: string;
   order_id: string;
   amount_cents: number;
-  status: string;
+  status: RefundStatus;
   reason: string | null;
+}
+
+function invalidRequest(c: Context, issues: unknown) {
+  return c.json({ error: "invalid request", details: issues }, 400);
 }
 
 function refundView(row: RefundRow) {
@@ -65,8 +74,10 @@ function orderView(db: DatabaseHandle, row: OrderRow) {
     .all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? ORDER BY rowid", [row.id])
     .map(refundView);
   const appliedSum = refunds.reduce((sum, r) => (r.status === "applied" ? sum + r.amountCents : sum), 0);
-  // Reversed is derived, never stored: applied refunds equal the total.
-  const attributionStatus = appliedSum === row.total_cents ? "reversed" : row.attribution_status;
+  // Reversed is derived, never stored: attributed AND fully refunded.
+  // Creator-less orders stay unattributed with net zero.
+  const attributionStatus: DerivedAttributionStatus =
+    row.creator_id !== null && appliedSum === row.total_cents ? "reversed" : row.attribution_status;
   return {
     id: row.id,
     totalCents: row.total_cents,
@@ -97,7 +108,7 @@ export function createApp(db: DatabaseHandle): Hono {
   app.post("/creators", async (c) => {
     const parsed = CreatorBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json({ error: "invalid request", details: parsed.error.issues }, 400);
+      return invalidRequest(c, parsed.error.issues);
     }
     try {
       const creator = createCreator(db, parsed.data);
@@ -113,7 +124,7 @@ export function createApp(db: DatabaseHandle): Hono {
   app.post("/orders", async (c) => {
     const parsed = OrderBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json({ error: "invalid request", details: parsed.error.issues }, 400);
+      return invalidRequest(c, parsed.error.issues);
     }
     const body = parsed.data;
     const result = db.transaction(() => {
@@ -136,6 +147,7 @@ export function createApp(db: DatabaseHandle): Hono {
       );
       // Apply early refunds in arrival order inside the same transaction,
       // respecting the cap: a pending that would breach it becomes rejected.
+      // Pending rows are provisional; applied history is never mutated.
       let appliedSum = 0;
       const pendings = db.all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? AND status = 'pending' ORDER BY rowid", [
         body.id,
@@ -163,7 +175,7 @@ export function createApp(db: DatabaseHandle): Hono {
     const rawOrderId = c.req.query("orderId");
     const orderId = rawOrderId?.trim();
     if (!orderId) {
-      return c.json({ error: "orderId query parameter is required" }, 400);
+      return invalidRequest(c, [{ path: ["orderId"], message: "orderId query parameter is required" }]);
     }
     const refunds = db
       .all<RefundRow>("SELECT * FROM refunds WHERE order_id = ? ORDER BY rowid", [orderId])
@@ -174,7 +186,7 @@ export function createApp(db: DatabaseHandle): Hono {
   app.post("/refunds", async (c) => {
     const parsed = RefundBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json({ error: "invalid request", details: parsed.error.issues }, 400);
+      return invalidRequest(c, parsed.error.issues);
     }
     const body = parsed.data;
     const result = db.transaction(() => {

@@ -1,4 +1,5 @@
 import type { DatabaseHandle } from "./db.js";
+import { normalizeCoupon, normalizeUtmCampaign } from "./attribution.js";
 
 export interface Creator {
   id: number;
@@ -16,15 +17,6 @@ interface CreatorRow {
 
 function toCreator(row: CreatorRow): Creator {
   return { id: row.id, name: row.name, couponCode: row.coupon_code, utmCampaign: row.utm_campaign };
-}
-
-// Normalization (single rule): coupon trimmed + uppercased, UTM trimmed + lowercased.
-export function normalizeCoupon(raw: string): string {
-  return raw.trim().toUpperCase();
-}
-
-export function normalizeUtmCampaign(raw: string): string {
-  return raw.trim().toLowerCase();
 }
 
 export const SEED_CREATORS = [
