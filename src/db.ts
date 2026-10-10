@@ -77,5 +77,12 @@ export function migrate(db: DatabaseHandle): void {
       creator_id INTEGER REFERENCES creators(id),
       attribution_status TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS refunds (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT
+    );
   `);
 }
